@@ -9,14 +9,10 @@ import datetime
 import scipy.fft
 from scipy.signal import find_peaks
 import joblib
-import os
+import subprocess
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
-
-# ✅ WebRTC (بديل sounddevice)
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
-import av
 
 
 # =========================
@@ -91,7 +87,7 @@ def classify_ml(features):
 
 
 # =========================
-# الرسوم البيانية
+# Waveform
 # =========================
 def plot_wave(y):
     fig, ax = plt.subplots()
@@ -100,6 +96,9 @@ def plot_wave(y):
     return fig
 
 
+# =========================
+# Frequency
+# =========================
 def plot_frequency(y, sr):
     fft = np.abs(scipy.fft.fft(y))
     freq = scipy.fft.fftfreq(len(fft), 1/sr)
@@ -111,6 +110,9 @@ def plot_frequency(y, sr):
     return fig
 
 
+# =========================
+# Spectrogram
+# =========================
 def plot_spectrogram(y, sr):
     spec = librosa.feature.melspectrogram(y=y, sr=sr)
     spec_db = librosa.power_to_db(spec, ref=np.max)
@@ -122,7 +124,7 @@ def plot_spectrogram(y, sr):
 
 
 # =========================
-# PDF
+# PDF Report
 # =========================
 def create_pdf(features, risk, label, img_path):
     file_name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
@@ -148,19 +150,6 @@ def create_pdf(features, risk, label, img_path):
 
 
 # =========================
-# WebRTC Audio Processor
-# =========================
-class AudioProcessor(AudioProcessorBase):
-    def __init__(self):
-        self.frames = []
-
-    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        audio = frame.to_ndarray()
-        self.frames.append(audio)
-        return frame
-
-
-# =========================
 # Session State
 # =========================
 if "audio_path" not in st.session_state:
@@ -171,50 +160,44 @@ if "audio_bytes" not in st.session_state:
 
 
 # =========================
-# اختيار المصدر
+# UI اختيار
 # =========================
-option = st.radio("اختر طريقة الإدخال:", ["رفع ملف", "تسجيل مباشر (WebRTC)"])
-
-
-# =========================
-# رفع ملف
-# =========================
-if option == "رفع ملف":
-    uploaded = st.file_uploader("ارفع ملف صوت", type=["wav", "mp3"])
-
-    if uploaded:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        tmp.write(uploaded.read())
-        tmp.close()
-
-        st.session_state.audio_path = tmp.name
-        st.session_state.audio_bytes = open(tmp.name, "rb").read()
+option = st.radio("اختر طريقة الإدخال:", ["رفع فيديو/صوت"])
 
 
 # =========================
-# WebRTC تسجيل صوت (احترافي)
+# رفع فيديو أو صوت + استخراج الصوت
 # =========================
-else:
-    st.subheader("🎙️ تسجيل صوت مباشر")
+uploaded = st.file_uploader(
+    "📁 ارفع فيديو من iPad / iPhone أو ملف صوت",
+    type=["mp4", "mov", "m4a", "wav", "mp3"]
+)
 
-    ctx = webrtc_streamer(
-        key="voice-recorder",
-        audio_processor_factory=AudioProcessor,
-        media_stream_constraints={"audio": True, "video": False},
-    )
+if uploaded:
+    tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_video.write(uploaded.read())
+    tmp_video.close()
 
-    if ctx.audio_processor:
-        if st.button("💾 حفظ التسجيل"):
-            audio_data = np.concatenate(ctx.audio_processor.frames, axis=1)
-            audio_data = audio_data.T.astype(np.float32)
+    audio_path = tempfile.mktemp(suffix=".wav")
 
-            tmp_path = tempfile.mktemp(suffix=".wav")
-            sf.write(tmp_path, audio_data, 44100)
+    # استخراج الصوت باستخدام ffmpeg
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i", tmp_video.name,
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "44100",
+        "-ac", "1",
+        audio_path
+    ]
 
-            st.session_state.audio_path = tmp_path
-            st.session_state.audio_bytes = open(tmp_path, "rb").read()
+    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-            st.success("تم حفظ التسجيل بنجاح 🎉")
+    st.session_state.audio_path = audio_path
+    st.session_state.audio_bytes = open(audio_path, "rb").read()
+
+    st.success("تم استخراج الصوت من الفيديو 🎉")
 
 
 # =========================
@@ -252,7 +235,7 @@ if st.session_state.audio_path:
     st.json(features)
 
     # =========================
-    # PDF Report
+    # PDF
     # =========================
     if st.button("📄 إنشاء تقرير PDF"):
 
