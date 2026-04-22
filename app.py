@@ -1,28 +1,30 @@
 import streamlit as st
 import numpy as np
-import soundfile as sf
 import librosa
 import matplotlib.pyplot as plt
 import tempfile
 import datetime
 import joblib
-import subprocess
+import soundfile as sf
+
 from scipy.signal import find_peaks
 import scipy.fft
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
 
+from streamlit_mic_recorder import mic_recorder
+
 
 # =========================
-# إعداد الصفحة
+# UI
 # =========================
 st.set_page_config(page_title="Voice AI Analyzer PRO", layout="centered")
-st.title("🎤 Voice AI Analyzer - Production Version")
+st.title("🎤 Voice AI Analyzer (Stable Version)")
 
 
 # =========================
-# تحميل الموديل
+# Model
 # =========================
 @st.cache_resource
 def load_model():
@@ -32,31 +34,9 @@ model = load_model()
 
 
 # =========================
-# استخراج الصوت من فيديو (FFmpeg)
+# Safe audio loader (NO librosa.load)
 # =========================
-def extract_audio(file_path):
-    audio_path = tempfile.mktemp(suffix=".wav")
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i", file_path,
-        "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "22050",
-        "-ac", "1",
-        audio_path
-    ]
-
-    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    return audio_path
-
-
-# =========================
-# تحميل صوت آمن (بدون librosa.load)
-# =========================
-def load_audio_safe(path):
+def load_audio(path):
     y, sr = sf.read(path)
 
     if len(y.shape) > 1:
@@ -67,7 +47,7 @@ def load_audio_safe(path):
 
 
 # =========================
-# تحليل الصوت
+# Analysis
 # =========================
 def analyze_audio(y, sr):
     energy = np.mean(np.abs(y))
@@ -89,7 +69,7 @@ def analyze_audio(y, sr):
 
 
 # =========================
-# Risk Score
+# Risk
 # =========================
 def risk_score(f):
     score = 0
@@ -105,9 +85,9 @@ def risk_score(f):
 
 
 # =========================
-# ML Prediction
+# ML
 # =========================
-def classify_ml(features):
+def classify(features):
     X = np.array([[features["pitch_std"], features["energy"],
                    features["zcr"], features["shimmer"],
                    features["speech_rate"]]])
@@ -120,95 +100,63 @@ def classify_ml(features):
 
 
 # =========================
-# Visualizations
+# UI MODE
 # =========================
-def plot_wave(y):
-    fig, ax = plt.subplots()
-    ax.plot(y)
-    ax.set_title("Waveform")
-    return fig
+mode = st.radio("اختر:", ["🎙️ تسجيل", "📁 رفع ملف صوت"])
 
 
-def plot_frequency(y, sr):
-    fft = np.abs(scipy.fft.fft(y))
-    freq = scipy.fft.fftfreq(len(fft), 1/sr)
-
-    fig, ax = plt.subplots()
-    ax.plot(freq[:len(freq)//2], fft[:len(freq)//2])
-    ax.set_title("Frequency Spectrum")
-    return fig
+audio_path = None
+audio_bytes = None
 
 
 # =========================
-# PDF Report
+# 🎙️ تسجيل صوت (FIXED - WORKS ON CLOUD)
 # =========================
-def create_pdf(features, risk, label, img_path):
-    file_name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
-    doc = SimpleDocTemplate(file_name)
-    styles = getSampleStyleSheet()
-    content = []
+if mode == "🎙️ تسجيل":
 
-    content.append(Paragraph("Voice AI Analysis Report", styles["Title"]))
-    content.append(Spacer(1, 10))
+    audio = mic_recorder(
+        start_prompt="🔴 تسجيل",
+        stop_prompt="⏹️ إيقاف"
+    )
 
-    content.append(Paragraph(f"Risk Score: {risk}%", styles["Heading2"]))
-    content.append(Paragraph(f"Prediction: {label}", styles["Heading2"]))
-    content.append(Spacer(1, 10))
+    if audio:
 
-    for k, v in features.items():
-        content.append(Paragraph(f"{k}: {round(v, 4)}", styles["Normal"]))
+        tmp = tempfile.mktemp(suffix=".wav")
 
-    content.append(Spacer(1, 10))
-    content.append(Image(img_path, width=400, height=150))
+        with open(tmp, "wb") as f:
+            f.write(audio["bytes"])
 
-    doc.build(content)
-    return file_name
+        audio_path = tmp
+        audio_bytes = audio["bytes"]
+
+        st.success("تم التسجيل بنجاح 🎉")
 
 
 # =========================
-# Session
+# 📁 رفع ملف
 # =========================
-if "audio_path" not in st.session_state:
-    st.session_state.audio_path = None
+else:
 
-if "audio_bytes" not in st.session_state:
-    st.session_state.audio_bytes = None
+    file = st.file_uploader("ارفع ملف صوت", type=["wav", "mp3", "m4a"])
 
+    if file:
 
-# =========================
-# UI
-# =========================
-st.subheader("📁 رفع فيديو أو صوت")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        tmp.write(file.read())
+        tmp.close()
 
-uploaded = st.file_uploader(
-    "ارفع ملف (iPad / iPhone / MP4 / MOV / MP3 / WAV)",
-    type=["mp4", "mov", "mp3", "wav", "m4a"]
-)
+        audio_path = tmp.name
+        audio_bytes = open(tmp.name, "rb").read()
+
+        st.success("تم رفع الملف 🎉")
 
 
 # =========================
-# معالجة الملف
+# PROCESS
 # =========================
-if uploaded:
+if audio_path:
 
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp_file.write(uploaded.read())
-    tmp_file.close()
-
-    audio_path = extract_audio(tmp_file.name)
-
-    st.session_state.audio_path = audio_path
-    st.session_state.audio_bytes = open(audio_path, "rb").read()
-
-    st.success("✔ تم استخراج الصوت بنجاح")
-
-
-# =========================
-# التحليل
-# =========================
-if st.session_state.audio_path:
-
-    y, sr = load_audio_safe(st.session_state.audio_path)
+    y, sr = load_audio(audio_path)
 
     features = analyze_audio(y, sr)
     risk = risk_score(features)
@@ -217,8 +165,8 @@ if st.session_state.audio_path:
     st.progress(risk / 100)
     st.write(f"{risk}%")
 
-    st.subheader("🧠 ML Result")
-    label, prob = classify_ml(features)
+    st.subheader("🧠 Result")
+    label, prob = classify(features)
 
     st.success(label)
 
@@ -228,27 +176,13 @@ if st.session_state.audio_path:
         "تعاطي": float(prob[2]),
     })
 
-    st.audio(st.session_state.audio_bytes)
+    st.audio(audio_bytes)
 
-    st.pyplot(plot_wave(y))
-    st.pyplot(plot_frequency(y, sr))
+    # Waveform
+    fig, ax = plt.subplots()
+    ax.plot(y)
+    ax.set_title("Waveform")
+    st.pyplot(fig)
 
     st.write("### Features")
     st.json(features)
-
-    # =========================
-    # PDF
-    # =========================
-    if st.button("📄 إنشاء تقرير PDF"):
-
-        img_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
-
-        plt.figure()
-        plt.plot(y)
-        plt.savefig(img_path)
-        plt.close()
-
-        pdf_file = create_pdf(features, risk, label, img_path)
-
-        with open(pdf_file, "rb") as f:
-            st.download_button("تحميل التقرير", f, file_name=pdf_file)
