@@ -10,21 +10,37 @@ import scipy.fft
 from scipy.signal import find_peaks
 import joblib
 import os
-import base64
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
 
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+import av
+
+# ✅ NEW: دعم تحويل ملفات iPhone
+from pydub import AudioSegment
+
 
 # =========================
-# PAGE
+# إعداد الصفحة
 # =========================
-st.set_page_config(page_title="Voice AI iPhone", layout="centered")
-st.title("🎤 Voice AI Analyzer (iPhone Stable)")
+st.set_page_config(page_title="Voice AI Analyzer", layout="centered")
+st.title("🎤 نظام تحليل الصوت الذكي")
 
 
 # =========================
-# MODEL
+# تحويل أي صوت إلى WAV (مهم لـ iPhone)
+# =========================
+def convert_to_wav(file_path):
+    audio = AudioSegment.from_file(file_path)
+    wav_path = file_path.rsplit(".", 1)[0] + ".wav"
+    audio = audio.set_frame_rate(44100).set_channels(1)
+    audio.export(wav_path, format="wav")
+    return wav_path
+
+
+# =========================
+# تحميل الموديل
 # =========================
 @st.cache_resource
 def load_model():
@@ -34,19 +50,7 @@ model = load_model()
 
 
 # =========================
-# SAFE AUDIO LOAD
-# =========================
-def load_audio(file):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    tmp.write(file.read())
-    tmp.close()
-
-    y, sr = librosa.load(tmp.name, sr=16000, mono=True)
-    return y, sr, tmp.name
-
-
-# =========================
-# FEATURES
+# تحليل الصوت
 # =========================
 def analyze_audio(y, sr):
     pitches, _ = librosa.piptrack(y=y, sr=sr)
@@ -70,16 +74,27 @@ def analyze_audio(y, sr):
 
 
 # =========================
-# ML
+# Risk Score
 # =========================
-def classify(features):
-    X = np.array([[
-        features["pitch_std"],
-        features["energy"],
-        features["zcr"],
-        features["shimmer"],
-        features["speech_rate"]
-    ]])
+def risk_score(f):
+    score = 0
+    if f["pitch_std"] > 50:
+        score += 20
+    if f["shimmer"] > 0.05:
+        score += 20
+    if f["speech_rate"] < 2:
+        score += 20
+    if f["zcr"] < 0.05:
+        score += 10
+    return min(score, 100)
+
+
+# =========================
+# ML Classification
+# =========================
+def classify_ml(features):
+    X = np.array([[features["pitch_std"], features["energy"], features["zcr"],
+                   features["shimmer"], features["speech_rate"]]])
 
     pred = model.predict(X)[0]
     prob = model.predict_proba(X)[0]
@@ -89,7 +104,7 @@ def classify(features):
 
 
 # =========================
-# PLOT
+# الرسوم البيانية
 # =========================
 def plot_wave(y):
     fig, ax = plt.subplots()
@@ -98,70 +113,68 @@ def plot_wave(y):
     return fig
 
 
+def plot_frequency(y, sr):
+    fft = np.abs(scipy.fft.fft(y))
+    freq = scipy.fft.fftfreq(len(fft), 1/sr)
+    half = len(freq)//2
+
+    fig, ax = plt.subplots()
+    ax.plot(freq[:half], fft[:half])
+    ax.set_title("Frequency Spectrum")
+    return fig
+
+
+def plot_spectrogram(y, sr):
+    spec = librosa.feature.melspectrogram(y=y, sr=sr)
+    spec_db = librosa.power_to_db(spec, ref=np.max)
+
+    fig, ax = plt.subplots()
+    librosa.display.specshow(spec_db, sr=sr, x_axis='time', y_axis='mel', ax=ax)
+    ax.set_title("Spectrogram")
+    return fig
+
+
 # =========================
 # PDF
 # =========================
-def create_pdf(features, label):
-    name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
-    doc = SimpleDocTemplate(name)
+def create_pdf(features, risk, label, img_path):
+    file_name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
+    doc = SimpleDocTemplate(file_name)
     styles = getSampleStyleSheet()
     content = []
 
-    content.append(Paragraph("Voice AI Report", styles["Title"]))
+    content.append(Paragraph("Voice Analysis Report", styles["Title"]))
     content.append(Spacer(1, 10))
-    content.append(Paragraph(f"Result: {label}", styles["Heading2"]))
+
+    content.append(Paragraph(f"Risk Score: {risk}%", styles["Heading2"]))
+    content.append(Paragraph(f"ML Result: {label}", styles["Heading2"]))
+    content.append(Spacer(1, 10))
 
     for k, v in features.items():
-        content.append(Paragraph(f"{k}: {v:.4f}", styles["Normal"]))
+        content.append(Paragraph(f"{k}: {round(v, 4)}", styles["Normal"]))
+
+    content.append(Spacer(1, 10))
+    content.append(Image(img_path, width=400, height=150))
 
     doc.build(content)
-    return name
+    return file_name
 
 
 # =========================
-# 🔴 iPhone Recorder (HTML)
+# WebRTC
 # =========================
-def audio_recorder():
-    st.markdown("""
-    <h3>🎙️ تسجيل مباشر من iPhone</h3>
+class AudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.frames = []
 
-    <button onclick="startRecording()">Start Recording</button>
-    <button onclick="stopRecording()">Stop</button>
-
-    <script>
-    let recorder;
-    let chunks = [];
-
-    async function startRecording(){
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        recorder = new MediaRecorder(stream);
-        recorder.start();
-
-        recorder.ondataavailable = e => chunks.push(e.data);
-
-        recorder.onstop = () => {
-            const blob = new Blob(chunks, { type: 'audio/wav' });
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-
-            reader.onloadend = () => {
-                window.parent.postMessage({
-                    type: "streamlit:audio",
-                    data: reader.result
-                }, "*");
-            }
-        }
-    }
-
-    function stopRecording(){
-        recorder.stop();
-    }
-    </script>
-    """, unsafe_allow_html=True)
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        audio = frame.to_ndarray()
+        self.frames.append(audio)
+        return frame
 
 
 # =========================
-# STATE
+# Session State
 # =========================
 if "audio_path" not in st.session_state:
     st.session_state.audio_path = None
@@ -171,44 +184,77 @@ if "audio_bytes" not in st.session_state:
 
 
 # =========================
-# INPUT
+# اختيار الإدخال
 # =========================
-mode = st.radio("اختر:", ["📁 رفع ملف", "🎙️ تسجيل iPhone"])
+option = st.radio("اختر طريقة الإدخال:", ["رفع ملف", "تسجيل مباشر (WebRTC)"])
 
 
 # =========================
-# UPLOAD
+# رفع ملف (📱 يدعم iPhone الآن)
 # =========================
-if mode == "📁 رفع ملف":
-    uploaded = st.file_uploader("Upload audio/video", type=["wav", "mp3", "m4a", "mp4", "mov"])
+if option == "رفع ملف":
+    uploaded = st.file_uploader("ارفع ملف صوت (iPhone / Android / MP3 / WAV)", 
+                                type=["wav", "mp3", "m4a", "aac"])
 
     if uploaded:
-        y, sr, path = load_audio(uploaded)
+        ext = uploaded.name.split(".")[-1].lower()
 
-        st.session_state.audio_path = path
-        st.session_state.audio_bytes = uploaded.read()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}")
+        tmp.write(uploaded.read())
+        tmp.close()
 
-        st.success("Uploaded ✔")
+        # ✅ تحويل لأي صيغة إلى WAV
+        wav_path = convert_to_wav(tmp.name)
+
+        st.session_state.audio_path = wav_path
+        st.session_state.audio_bytes = open(wav_path, "rb").read()
+
+        st.success("تم رفع وتحويل الملف بنجاح 📱✔️")
 
 
 # =========================
-# RECORD UI
+# WebRTC
 # =========================
 else:
-    audio_recorder()
+    st.subheader("🎙️ تسجيل صوت مباشر")
+
+    ctx = webrtc_streamer(
+        key="voice-recorder",
+        audio_processor_factory=AudioProcessor,
+        media_stream_constraints={"audio": True, "video": False},
+    )
+
+    if ctx.audio_processor:
+        if st.button("💾 حفظ التسجيل"):
+            audio_data = np.concatenate(ctx.audio_processor.frames, axis=1)
+            audio_data = audio_data.T.astype(np.float32)
+
+            tmp_path = tempfile.mktemp(suffix=".wav")
+            sf.write(tmp_path, audio_data, 44100)
+
+            st.session_state.audio_path = tmp_path
+            st.session_state.audio_bytes = open(tmp_path, "rb").read()
+
+            st.success("تم حفظ التسجيل بنجاح 🎉")
 
 
 # =========================
-# PROCESS
+# التحليل
 # =========================
 if st.session_state.audio_path:
 
-    y, sr = librosa.load(st.session_state.audio_path, sr=16000)
+    y, sr = librosa.load(st.session_state.audio_path, sr=44100)
 
     features = analyze_audio(y, sr)
-    label, prob = classify(features)
+    risk = risk_score(features)
 
-    st.subheader("📊 Result")
+    st.subheader("📊 Risk Score")
+    st.progress(risk / 100)
+    st.write(f"{risk}%")
+
+    st.subheader("🧠 ML Result")
+    label, prob = classify_ml(features)
+
     st.success(label)
 
     st.write({
@@ -220,11 +266,25 @@ if st.session_state.audio_path:
     st.audio(st.session_state.audio_bytes)
 
     st.pyplot(plot_wave(y))
+    st.pyplot(plot_frequency(y, sr))
+    st.pyplot(plot_spectrogram(y, sr))
 
     st.write("### Features")
     st.json(features)
 
-    if st.button("📄 PDF Report"):
-        pdf = create_pdf(features, label)
-        with open(pdf, "rb") as f:
-            st.download_button("Download", f, file_name=pdf)
+    # =========================
+    # PDF
+    # =========================
+    if st.button("📄 إنشاء تقرير PDF"):
+
+        img_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+
+        plt.figure()
+        plt.plot(y)
+        plt.savefig(img_path)
+        plt.close()
+
+        pdf_file = create_pdf(features, risk, label, img_path)
+
+        with open(pdf_file, "rb") as f:
+            st.download_button("تحميل التقرير", f, file_name=pdf_file)
