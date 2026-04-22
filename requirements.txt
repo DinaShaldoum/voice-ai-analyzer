@@ -6,7 +6,6 @@ matplotlib
 scipy
 joblib
 reportlab
-scikit-learn
-streamlit-mic-recorder
 streamlit-webrtc
-av
+pydub
+ffmpeg-python
