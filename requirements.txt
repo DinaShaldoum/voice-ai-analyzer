@@ -11,3 +11,4 @@ scikit-learn
  av
 streamlit-webrtc
 ffmpeg-python
+streamlit-mic-recorder
