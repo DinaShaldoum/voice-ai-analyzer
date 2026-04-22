@@ -1,28 +1,24 @@
 import streamlit as st
 import numpy as np
-import librosa
-import librosa.display
 import soundfile as sf
+import librosa
 import matplotlib.pyplot as plt
 import tempfile
 import datetime
-import scipy.fft
-from scipy.signal import find_peaks
 import joblib
 import subprocess
+from scipy.signal import find_peaks
+import scipy.fft
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
-
-# 🎤 تسجيل صوت (بديل WebRTC)
-from streamlit_mic_recorder import mic_recorder
 
 
 # =========================
 # إعداد الصفحة
 # =========================
-st.set_page_config(page_title="Voice AI Analyzer", layout="centered")
-st.title("🎤 نظام تحليل الصوت الذكي")
+st.set_page_config(page_title="Voice AI Analyzer PRO", layout="centered")
+st.title("🎤 Voice AI Analyzer - Production Version")
 
 
 # =========================
@@ -36,19 +32,52 @@ model = load_model()
 
 
 # =========================
+# استخراج الصوت من فيديو (FFmpeg)
+# =========================
+def extract_audio(file_path):
+    audio_path = tempfile.mktemp(suffix=".wav")
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i", file_path,
+        "-vn",
+        "-acodec", "pcm_s16le",
+        "-ar", "22050",
+        "-ac", "1",
+        audio_path
+    ]
+
+    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    return audio_path
+
+
+# =========================
+# تحميل صوت آمن (بدون librosa.load)
+# =========================
+def load_audio_safe(path):
+    y, sr = sf.read(path)
+
+    if len(y.shape) > 1:
+        y = np.mean(y, axis=1)
+
+    sr = 22050
+    return y, sr
+
+
+# =========================
 # تحليل الصوت
 # =========================
 def analyze_audio(y, sr):
-    pitches, _ = librosa.piptrack(y=y, sr=sr)
-    pitch_values = pitches[pitches > 0]
-
-    pitch_std = np.std(pitch_values) if len(pitch_values) else 0
-    energy = np.mean(librosa.feature.rms(y=y))
-    zcr = np.mean(librosa.feature.zero_crossing_rate(y))
-    shimmer = np.std(librosa.feature.rms(y=y))
+    energy = np.mean(np.abs(y))
+    zcr = np.mean(np.diff(np.sign(y)) != 0)
+    shimmer = np.std(y)
 
     peaks, _ = find_peaks(y, height=0.02)
     speech_rate = len(peaks) / (len(y) / sr)
+
+    pitch_std = np.std(y)
 
     return {
         "pitch_std": float(pitch_std),
@@ -64,9 +93,9 @@ def analyze_audio(y, sr):
 # =========================
 def risk_score(f):
     score = 0
-    if f["pitch_std"] > 50:
+    if f["pitch_std"] > 0.05:
         score += 20
-    if f["shimmer"] > 0.05:
+    if f["shimmer"] > 0.1:
         score += 20
     if f["speech_rate"] < 2:
         score += 20
@@ -76,11 +105,12 @@ def risk_score(f):
 
 
 # =========================
-# ML Classification
+# ML Prediction
 # =========================
 def classify_ml(features):
-    X = np.array([[features["pitch_std"], features["energy"], features["zcr"],
-                   features["shimmer"], features["speech_rate"]]])
+    X = np.array([[features["pitch_std"], features["energy"],
+                   features["zcr"], features["shimmer"],
+                   features["speech_rate"]]])
 
     pred = model.predict(X)[0]
     prob = model.predict_proba(X)[0]
@@ -90,7 +120,7 @@ def classify_ml(features):
 
 
 # =========================
-# الرسوم البيانية
+# Visualizations
 # =========================
 def plot_wave(y):
     fig, ax = plt.subplots()
@@ -102,21 +132,10 @@ def plot_wave(y):
 def plot_frequency(y, sr):
     fft = np.abs(scipy.fft.fft(y))
     freq = scipy.fft.fftfreq(len(fft), 1/sr)
-    half = len(freq)//2
 
     fig, ax = plt.subplots()
-    ax.plot(freq[:half], fft[:half])
+    ax.plot(freq[:len(freq)//2], fft[:len(freq)//2])
     ax.set_title("Frequency Spectrum")
-    return fig
-
-
-def plot_spectrogram(y, sr):
-    spec = librosa.feature.melspectrogram(y=y, sr=sr)
-    spec_db = librosa.power_to_db(spec, ref=np.max)
-
-    fig, ax = plt.subplots()
-    librosa.display.specshow(spec_db, sr=sr, x_axis='time', y_axis='mel', ax=ax)
-    ax.set_title("Spectrogram")
     return fig
 
 
@@ -129,11 +148,11 @@ def create_pdf(features, risk, label, img_path):
     styles = getSampleStyleSheet()
     content = []
 
-    content.append(Paragraph("Voice Analysis Report", styles["Title"]))
+    content.append(Paragraph("Voice AI Analysis Report", styles["Title"]))
     content.append(Spacer(1, 10))
 
     content.append(Paragraph(f"Risk Score: {risk}%", styles["Heading2"]))
-    content.append(Paragraph(f"ML Result: {label}", styles["Heading2"]))
+    content.append(Paragraph(f"Prediction: {label}", styles["Heading2"]))
     content.append(Spacer(1, 10))
 
     for k, v in features.items():
@@ -147,7 +166,7 @@ def create_pdf(features, risk, label, img_path):
 
 
 # =========================
-# Session State
+# Session
 # =========================
 if "audio_path" not in st.session_state:
     st.session_state.audio_path = None
@@ -157,72 +176,31 @@ if "audio_bytes" not in st.session_state:
 
 
 # =========================
-# اختيار الطريقة
+# UI
 # =========================
-mode = st.radio("اختر طريقة الإدخال:", ["📁 رفع ملف", "🎙️ تسجيل صوت"])
+st.subheader("📁 رفع فيديو أو صوت")
 
-
-# =========================
-# 1) رفع فيديو/صوت
-# =========================
-if mode == "📁 رفع ملف":
-
-    uploaded = st.file_uploader(
-        "ارفع فيديو (iPad / iPhone) أو ملف صوت",
-        type=["mp4", "mov", "m4a", "wav", "mp3"]
-    )
-
-    if uploaded:
-        tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        tmp_video.write(uploaded.read())
-        tmp_video.close()
-
-        audio_path = tempfile.mktemp(suffix=".wav")
-
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i", tmp_video.name,
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "1",
-            audio_path
-        ]
-
-        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-        st.session_state.audio_path = audio_path
-        st.session_state.audio_bytes = open(audio_path, "rb").read()
-
-        st.success("تم استخراج الصوت من الفيديو 🎉")
+uploaded = st.file_uploader(
+    "ارفع ملف (iPad / iPhone / MP4 / MOV / MP3 / WAV)",
+    type=["mp4", "mov", "mp3", "wav", "m4a"]
+)
 
 
 # =========================
-# 2) تسجيل صوت مباشر
+# معالجة الملف
 # =========================
-else:
+if uploaded:
 
-    st.subheader("🎙️ تسجيل صوت مباشر")
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_file.write(uploaded.read())
+    tmp_file.close()
 
-    audio = mic_recorder(
-        start_prompt="🔴 ابدأ التسجيل",
-        stop_prompt="⏹️ إيقاف التسجيل"
-    )
+    audio_path = extract_audio(tmp_file.name)
 
-    if audio:
+    st.session_state.audio_path = audio_path
+    st.session_state.audio_bytes = open(audio_path, "rb").read()
 
-        st.audio(audio["bytes"])
-
-        tmp_path = tempfile.mktemp(suffix=".wav")
-
-        with open(tmp_path, "wb") as f:
-            f.write(audio["bytes"])
-
-        st.session_state.audio_path = tmp_path
-        st.session_state.audio_bytes = audio["bytes"]
-
-        st.success("تم تسجيل الصوت بنجاح 🎉")
+    st.success("✔ تم استخراج الصوت بنجاح")
 
 
 # =========================
@@ -230,7 +208,7 @@ else:
 # =========================
 if st.session_state.audio_path:
 
-    y, sr = librosa.load(st.session_state.audio_path)
+    y, sr = load_audio_safe(st.session_state.audio_path)
 
     features = analyze_audio(y, sr)
     risk = risk_score(features)
@@ -254,13 +232,12 @@ if st.session_state.audio_path:
 
     st.pyplot(plot_wave(y))
     st.pyplot(plot_frequency(y, sr))
-    st.pyplot(plot_spectrogram(y, sr))
 
     st.write("### Features")
     st.json(features)
 
     # =========================
-    # PDF Report
+    # PDF
     # =========================
     if st.button("📄 إنشاء تقرير PDF"):
 
