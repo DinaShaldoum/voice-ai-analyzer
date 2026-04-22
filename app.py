@@ -10,17 +10,20 @@ import scipy.fft
 from scipy.signal import find_peaks
 import joblib
 import os
-import sounddevice as sd
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
+
+# ✅ WebRTC (بديل sounddevice)
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+import av
 
 
 # =========================
 # إعداد الصفحة
 # =========================
 st.set_page_config(page_title="Voice AI Analyzer", layout="centered")
-st.title("🎤 نظام تحليل الصوت")
+st.title("🎤 نظام تحليل الصوت الذكي")
 
 
 # =========================
@@ -74,7 +77,7 @@ def risk_score(f):
 
 
 # =========================
-# ML
+# ML Classification
 # =========================
 def classify_ml(features):
     X = np.array([[features["pitch_std"], features["energy"], features["zcr"],
@@ -88,7 +91,7 @@ def classify_ml(features):
 
 
 # =========================
-# الرسوم
+# الرسوم البيانية
 # =========================
 def plot_wave(y):
     fig, ax = plt.subplots()
@@ -145,6 +148,19 @@ def create_pdf(features, risk, label, img_path):
 
 
 # =========================
+# WebRTC Audio Processor
+# =========================
+class AudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.frames = []
+
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        audio = frame.to_ndarray()
+        self.frames.append(audio)
+        return frame
+
+
+# =========================
 # Session State
 # =========================
 if "audio_path" not in st.session_state:
@@ -155,9 +171,9 @@ if "audio_bytes" not in st.session_state:
 
 
 # =========================
-# اختيار
+# اختيار المصدر
 # =========================
-option = st.radio("اختر:", ["رفع ملف", "تسجيل"])
+option = st.radio("اختر طريقة الإدخال:", ["رفع ملف", "تسجيل مباشر (WebRTC)"])
 
 
 # =========================
@@ -176,25 +192,29 @@ if option == "رفع ملف":
 
 
 # =========================
-# تسجيل صوت (FIXED)
+# WebRTC تسجيل صوت (احترافي)
 # =========================
 else:
-    if st.button("🎙️ تسجيل 10 ثواني"):
+    st.subheader("🎙️ تسجيل صوت مباشر")
 
-        sr = 22050
-        duration = 10
+    ctx = webrtc_streamer(
+        key="voice-recorder",
+        audio_processor_factory=AudioProcessor,
+        media_stream_constraints={"audio": True, "video": False},
+    )
 
-        rec = sd.rec(int(duration * sr), samplerate=sr, channels=1, dtype='float32')
-        sd.wait()
-        rec = rec.squeeze()
+    if ctx.audio_processor:
+        if st.button("💾 حفظ التسجيل"):
+            audio_data = np.concatenate(ctx.audio_processor.frames, axis=1)
+            audio_data = audio_data.T.astype(np.float32)
 
-        tmp_path = tempfile.mktemp(suffix=".wav")
-        sf.write(tmp_path, rec, sr)
+            tmp_path = tempfile.mktemp(suffix=".wav")
+            sf.write(tmp_path, audio_data, 44100)
 
-        st.session_state.audio_path = tmp_path
-        st.session_state.audio_bytes = open(tmp_path, "rb").read()
+            st.session_state.audio_path = tmp_path
+            st.session_state.audio_bytes = open(tmp_path, "rb").read()
 
-        st.success("تم التسجيل بنجاح 🎉")
+            st.success("تم حفظ التسجيل بنجاح 🎉")
 
 
 # =========================
@@ -232,7 +252,7 @@ if st.session_state.audio_path:
     st.json(features)
 
     # =========================
-    # PDF
+    # PDF Report
     # =========================
     if st.button("📄 إنشاء تقرير PDF"):
 
