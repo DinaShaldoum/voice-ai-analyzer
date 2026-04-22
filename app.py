@@ -1,23 +1,21 @@
 import streamlit as st
 import numpy as np
+import librosa
 import tempfile
 import joblib
-import wave
 import matplotlib.pyplot as plt
-import datetime
-from scipy.signal import find_peaks
 import soundfile as sf
-import base64
-from io import BytesIO
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+from scipy.signal import find_peaks
+import datetime
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
 
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="Voice AI Stable iPhone", layout="centered")
-st.title("🎤 Voice AI Analyzer (Stable iPhone Version)")
+st.set_page_config(page_title="Voice AI Stable", layout="centered")
+st.title("🎤 Voice AI Analyzer (Stable Production)")
 
 
 # =========================
@@ -31,89 +29,19 @@ model = load_model()
 
 
 # =========================
-# JS AUDIO RECORDER (iPhone SAFE)
+# LOAD AUDIO SAFE (ANY FORMAT)
 # =========================
-def audio_recorder():
-    return st.markdown("""
-    <audio id="recorder" controls></audio>
-    <button onclick="startRecording()">🎙️ Start</button>
-    <button onclick="stopRecording()">⏹ Stop</button>
-    <script>
-    let recorder;
-    let chunks = [];
+def load_audio(file):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(file.read())
+        tmp_path = tmp.name
 
-    async function startRecording(){
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        recorder = new MediaRecorder(stream);
-        recorder.start();
-
-        recorder.ondataavailable = e => chunks.push(e.data);
-
-        recorder.onstop = async () => {
-            const blob = new Blob(chunks, { type: 'audio/wav' });
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-            reader.onloadend = () => {
-                window.parent.postMessage({
-                    type: "audio_data",
-                    data: reader.result
-                }, "*");
-            }
-        }
-    }
-
-    function stopRecording(){
-        recorder.stop();
-    }
-    </script>
-    """, unsafe_allow_html=True)
+    y, sr = librosa.load(tmp_path, sr=16000, mono=True)
+    return y, sr, tmp_path
 
 
 # =========================
-# RECEIVE AUDIO
-# =========================
-if "audio_path" not in st.session_state:
-    st.session_state.audio_path = None
-
-if "audio_bytes" not in st.session_state:
-    st.session_state.audio_bytes = None
-
-
-# =========================
-# UPLOAD
-# =========================
-uploaded = st.file_uploader("📁 Upload WAV / MP3", type=["wav", "mp3"])
-
-if uploaded:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    tmp.write(uploaded.read())
-    tmp.close()
-
-    st.session_state.audio_path = tmp.name
-    st.session_state.audio_bytes = open(tmp.name, "rb").read()
-
-    st.success("Uploaded ✔")
-
-
-# =========================
-# RECORD UI
-# =========================
-st.subheader("🎙️ Record (iPhone Ready)")
-audio_recorder()
-
-
-# =========================
-# SAFE WAV LOAD
-# =========================
-def load_audio(path):
-    y, sr = sf.read(path)
-    if len(y.shape) > 1:
-        y = np.mean(y, axis=1)
-    return y, sr
-
-
-# =========================
-# ANALYSIS
+# FEATURES
 # =========================
 def analyze(y, sr):
     energy = np.mean(np.abs(y))
@@ -123,7 +51,10 @@ def analyze(y, sr):
     peaks, _ = find_peaks(y, height=0.02)
     speech_rate = len(peaks) / (len(y) / sr)
 
+    pitch_std = np.std(y)
+
     return {
+        "pitch_std": float(pitch_std),
         "energy": float(energy),
         "zcr": float(zcr),
         "shimmer": float(shimmer),
@@ -132,29 +63,44 @@ def analyze(y, sr):
 
 
 # =========================
-# ML
+# FIXED PREDICTION
 # =========================
 def predict(features):
-    X = np.array([[features["energy"], features["zcr"],
-                   features["shimmer"], features["speech_rate"]]])
+    X = np.array([[
+        features["pitch_std"],
+        features["energy"],
+        features["zcr"],
+        features["shimmer"],
+        features["speech_rate"]
+    ]])
 
     pred = model.predict(X)[0]
     prob = model.predict_proba(X)[0]
 
-    labels = ["طبيعي", "اضطراب", "مؤشرات"]
+    labels = ["طبيعي", "اضطراب صوتي", "مؤشرات تعاطي"]
     return labels[pred], prob
+
+
+# =========================
+# PLOT
+# =========================
+def plot_wave(y):
+    fig, ax = plt.subplots()
+    ax.plot(y)
+    ax.set_title("Waveform")
+    return fig
 
 
 # =========================
 # PDF
 # =========================
 def create_pdf(features, label):
-    file_name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
-    doc = SimpleDocTemplate(file_name)
+    name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
+    doc = SimpleDocTemplate(name)
     styles = getSampleStyleSheet()
     content = []
 
-    content.append(Paragraph("Voice AI Report", styles["Title"]))
+    content.append(Paragraph("Voice Report", styles["Title"]))
     content.append(Spacer(1, 10))
     content.append(Paragraph(f"Result: {label}", styles["Heading2"]))
 
@@ -162,15 +108,20 @@ def create_pdf(features, label):
         content.append(Paragraph(f"{k}: {v:.4f}", styles["Normal"]))
 
     doc.build(content)
-    return file_name
+    return name
 
 
 # =========================
-# PROCESS
+# UPLOAD (iPhone SAFE)
 # =========================
-if st.session_state.audio_path:
+uploaded = st.file_uploader(
+    "📁 Upload audio/video (iPhone supported)",
+    type=["wav", "mp3", "m4a", "mp4", "mov"]
+)
 
-    y, sr = load_audio(st.session_state.audio_path)
+if uploaded:
+
+    y, sr, path = load_audio(uploaded)
 
     features = analyze(y, sr)
     label, prob = predict(features)
@@ -181,16 +132,15 @@ if st.session_state.audio_path:
     st.write({
         "طبيعي": float(prob[0]),
         "اضطراب": float(prob[1]),
-        "مؤشرات": float(prob[2]),
+        "تعاطي": float(prob[2]),
     })
 
-    st.audio(st.session_state.audio_bytes)
+    st.audio(uploaded)
 
-    fig, ax = plt.subplots()
-    ax.plot(y)
-    st.pyplot(fig)
+    st.pyplot(plot_wave(y))
 
-    st.write(features)
+    st.write("### Features")
+    st.json(features)
 
     if st.button("📄 PDF Report"):
         pdf = create_pdf(features, label)
