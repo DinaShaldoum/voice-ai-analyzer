@@ -9,3 +9,4 @@ sounddevice
 reportlab
 scikit-learn
  av
+streamlit-webrtc
