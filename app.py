@@ -1,25 +1,23 @@
 import streamlit as st
 import numpy as np
 import tempfile
-import datetime
 import joblib
-import matplotlib.pyplot as plt
 import wave
-import io
-
+import matplotlib.pyplot as plt
+import datetime
 from scipy.signal import find_peaks
+import soundfile as sf
+import base64
+from io import BytesIO
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
-
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
-import av
 
 
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="Voice AI Realtime", layout="centered")
-st.title("🎤 Voice AI Realtime Analyzer (Stable)")
+st.set_page_config(page_title="Voice AI Stable iPhone", layout="centered")
+st.title("🎤 Voice AI Analyzer (Stable iPhone Version)")
 
 
 # =========================
@@ -33,19 +31,89 @@ model = load_model()
 
 
 # =========================
-# SAFE WAV READER
+# JS AUDIO RECORDER (iPhone SAFE)
 # =========================
-def read_wav(path):
-    with wave.open(path, "rb") as wf:
-        sr = wf.getframerate()
-        audio = wf.readframes(wf.getnframes())
+def audio_recorder():
+    return st.markdown("""
+    <audio id="recorder" controls></audio>
+    <button onclick="startRecording()">🎙️ Start</button>
+    <button onclick="stopRecording()">⏹ Stop</button>
+    <script>
+    let recorder;
+    let chunks = [];
 
-    y = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+    async function startRecording(){
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recorder = new MediaRecorder(stream);
+        recorder.start();
+
+        recorder.ondataavailable = e => chunks.push(e.data);
+
+        recorder.onstop = async () => {
+            const blob = new Blob(chunks, { type: 'audio/wav' });
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = () => {
+                window.parent.postMessage({
+                    type: "audio_data",
+                    data: reader.result
+                }, "*");
+            }
+        }
+    }
+
+    function stopRecording(){
+        recorder.stop();
+    }
+    </script>
+    """, unsafe_allow_html=True)
+
+
+# =========================
+# RECEIVE AUDIO
+# =========================
+if "audio_path" not in st.session_state:
+    st.session_state.audio_path = None
+
+if "audio_bytes" not in st.session_state:
+    st.session_state.audio_bytes = None
+
+
+# =========================
+# UPLOAD
+# =========================
+uploaded = st.file_uploader("📁 Upload WAV / MP3", type=["wav", "mp3"])
+
+if uploaded:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    tmp.write(uploaded.read())
+    tmp.close()
+
+    st.session_state.audio_path = tmp.name
+    st.session_state.audio_bytes = open(tmp.name, "rb").read()
+
+    st.success("Uploaded ✔")
+
+
+# =========================
+# RECORD UI
+# =========================
+st.subheader("🎙️ Record (iPhone Ready)")
+audio_recorder()
+
+
+# =========================
+# SAFE WAV LOAD
+# =========================
+def load_audio(path):
+    y, sr = sf.read(path)
+    if len(y.shape) > 1:
+        y = np.mean(y, axis=1)
     return y, sr
 
 
 # =========================
-# ANALYSIS ENGINE (stable)
+# ANALYSIS
 # =========================
 def analyze(y, sr):
     energy = np.mean(np.abs(y))
@@ -64,7 +132,7 @@ def analyze(y, sr):
 
 
 # =========================
-# ML PREDICTION
+# ML
 # =========================
 def predict(features):
     X = np.array([[features["energy"], features["zcr"],
@@ -78,9 +146,9 @@ def predict(features):
 
 
 # =========================
-# PDF REPORT
+# PDF
 # =========================
-def create_pdf(features, label, img_path):
+def create_pdf(features, label):
     file_name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
     doc = SimpleDocTemplate(file_name)
     styles = getSampleStyleSheet()
@@ -89,114 +157,20 @@ def create_pdf(features, label, img_path):
     content.append(Paragraph("Voice AI Report", styles["Title"]))
     content.append(Spacer(1, 10))
     content.append(Paragraph(f"Result: {label}", styles["Heading2"]))
-    content.append(Spacer(1, 10))
 
     for k, v in features.items():
-        content.append(Paragraph(f"{k}: {round(v, 4)}", styles["Normal"]))
-
-    content.append(Spacer(1, 10))
-    content.append(Image(img_path, width=400, height=150))
+        content.append(Paragraph(f"{k}: {v:.4f}", styles["Normal"]))
 
     doc.build(content)
     return file_name
 
 
 # =========================
-# REALTIME AUDIO PROCESSOR (FIXED)
-# =========================
-class AudioProcessor(AudioProcessorBase):
-    def __init__(self):
-        self.buffer = []
-
-    def recv(self, frame: av.AudioFrame):
-        audio = frame.to_ndarray()
-
-        # safe append (no shape crash)
-        if audio is not None:
-            self.buffer.append(audio)
-
-        return frame
-
-
-# =========================
-# SESSION STATE
-# =========================
-if "audio_path" not in st.session_state:
-    st.session_state.audio_path = None
-
-if "audio_bytes" not in st.session_state:
-    st.session_state.audio_bytes = None
-
-
-# =========================
-# MODE
-# =========================
-mode = st.radio("اختر:", ["📁 رفع ملف", "🎙️ تسجيل realtime"])
-
-
-# =========================
-# UPLOAD
-# =========================
-if mode == "📁 رفع ملف":
-    uploaded = st.file_uploader("ارفع WAV فقط", type=["wav"])
-
-    if uploaded:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        tmp.write(uploaded.read())
-        tmp.close()
-
-        st.session_state.audio_path = tmp.name
-        st.session_state.audio_bytes = open(tmp.name, "rb").read()
-
-        st.success("✔ تم الرفع")
-
-
-# =========================
-# REALTIME RECORD (FIXED)
-# =========================
-else:
-    st.subheader("🎙️ تسجيل realtime من iPhone")
-
-    ctx = webrtc_streamer(
-        key="voice",
-        audio_processor_factory=AudioProcessor,
-        media_stream_constraints={"audio": True, "video": False},
-    )
-
-    if ctx.audio_processor:
-
-        if st.button("💾 حفظ التسجيل"):
-
-            frames = ctx.audio_processor.buffer
-
-            # 🔥 FIX: منع crash
-            clean = [f for f in frames if f is not None]
-
-            if len(clean) == 0:
-                st.warning("لا يوجد صوت مسجل")
-                st.stop()
-
-            audio = np.hstack(clean)
-
-            audio = audio.T.astype(np.float32)
-
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-
-            import soundfile as sf
-            sf.write(tmp.name, audio, 44100)
-
-            st.session_state.audio_path = tmp.name
-            st.session_state.audio_bytes = open(tmp.name, "rb").read()
-
-            st.success("✔ تم الحفظ")
-
-
-# =========================
-# PROCESSING
+# PROCESS
 # =========================
 if st.session_state.audio_path:
 
-    y, sr = read_wav(st.session_state.audio_path)
+    y, sr = load_audio(st.session_state.audio_path)
 
     features = analyze(y, sr)
     label, prob = predict(features)
@@ -212,30 +186,13 @@ if st.session_state.audio_path:
 
     st.audio(st.session_state.audio_bytes)
 
-    st.write("### Features")
-    st.json(features)
-
-    # =========================
-    # WAVE
-    # =========================
     fig, ax = plt.subplots()
     ax.plot(y)
-    ax.set_title("Waveform")
     st.pyplot(fig)
 
-    # =========================
-    # PDF
-    # =========================
-    if st.button("📄 Generate PDF"):
+    st.write(features)
 
-        img_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
-
-        plt.figure()
-        plt.plot(y)
-        plt.savefig(img_path)
-        plt.close()
-
-        pdf = create_pdf(features, label, img_path)
-
+    if st.button("📄 PDF Report"):
+        pdf = create_pdf(features, label)
         with open(pdf, "rb") as f:
             st.download_button("Download PDF", f, file_name=pdf)
