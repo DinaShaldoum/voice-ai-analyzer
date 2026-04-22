@@ -1,11 +1,10 @@
 import streamlit as st
 import numpy as np
-import librosa
-import matplotlib.pyplot as plt
+import wave
 import tempfile
-import datetime
+import matplotlib.pyplot as plt
 import joblib
-import soundfile as sf
+import datetime
 
 from scipy.signal import find_peaks
 import scipy.fft
@@ -13,14 +12,12 @@ import scipy.fft
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
 
-from streamlit_mic_recorder import mic_recorder
-
 
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="Voice AI Analyzer PRO", layout="centered")
-st.title("🎤 Voice AI Analyzer (Stable Version)")
+st.set_page_config(page_title="Voice AI Stable", layout="centered")
+st.title("🎤 Voice AI Analyzer - Stable Production")
 
 
 # =========================
@@ -34,22 +31,31 @@ model = load_model()
 
 
 # =========================
-# Safe audio loader (NO librosa.load)
+# SAFE WAV READER (NO LIBROSA, NO SOUNDFILE)
 # =========================
-def load_audio(path):
-    y, sr = sf.read(path)
+def read_wav(file_path):
+    with wave.open(file_path, "rb") as wf:
+        n_channels = wf.getnchannels()
+        frames = wf.getnframes()
+        audio = wf.readframes(frames)
+        sr = wf.getframerate()
 
-    if len(y.shape) > 1:
+    y = np.frombuffer(audio, dtype=np.int16)
+
+    if n_channels > 1:
+        y = y.reshape(-1, n_channels)
         y = np.mean(y, axis=1)
 
-    sr = 22050
+    y = y.astype(np.float32) / 32768.0
+
     return y, sr
 
 
 # =========================
-# Analysis
+# Analysis (NO LIBROSA)
 # =========================
-def analyze_audio(y, sr):
+def analyze(y, sr):
+
     energy = np.mean(np.abs(y))
     zcr = np.mean(np.diff(np.sign(y)) != 0)
     shimmer = np.std(y)
@@ -87,7 +93,7 @@ def risk_score(f):
 # =========================
 # ML
 # =========================
-def classify(features):
+def predict(features):
     X = np.array([[features["pitch_std"], features["energy"],
                    features["zcr"], features["shimmer"],
                    features["speech_rate"]]])
@@ -100,73 +106,98 @@ def classify(features):
 
 
 # =========================
-# UI MODE
+# WAV CONVERTER (UPLOAD SAFE)
 # =========================
-mode = st.radio("اختر:", ["🎙️ تسجيل", "📁 رفع ملف صوت"])
-
-
-audio_path = None
-audio_bytes = None
-
-
-# =========================
-# 🎙️ تسجيل صوت (FIXED - WORKS ON CLOUD)
-# =========================
-if mode == "🎙️ تسجيل":
-
-    audio = mic_recorder(
-        start_prompt="🔴 تسجيل",
-        stop_prompt="⏹️ إيقاف"
-    )
-
-    if audio:
-
-        tmp = tempfile.mktemp(suffix=".wav")
-
-        with open(tmp, "wb") as f:
-            f.write(audio["bytes"])
-
-        audio_path = tmp
-        audio_bytes = audio["bytes"]
-
-        st.success("تم التسجيل بنجاح 🎉")
+def save_upload(uploaded_file):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    tmp.write(uploaded_file.read())
+    tmp.close()
+    return tmp.name
 
 
 # =========================
-# 📁 رفع ملف
+# Plot
 # =========================
-else:
+def plot_wave(y):
+    fig, ax = plt.subplots()
+    ax.plot(y)
+    ax.set_title("Waveform")
+    return fig
 
-    file = st.file_uploader("ارفع ملف صوت", type=["wav", "mp3", "m4a"])
 
-    if file:
+# =========================
+# PDF
+# =========================
+def create_pdf(features, risk, label, img_path):
+    file_name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
+    doc = SimpleDocTemplate(file_name)
+    styles = getSampleStyleSheet()
+    content = []
 
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        tmp.write(file.read())
-        tmp.close()
+    content.append(Paragraph("Voice AI Report", styles["Title"]))
+    content.append(Spacer(1, 10))
 
-        audio_path = tmp.name
-        audio_bytes = open(tmp.name, "rb").read()
+    content.append(Paragraph(f"Risk Score: {risk}%", styles["Heading2"]))
+    content.append(Paragraph(f"Result: {label}", styles["Heading2"]))
 
-        st.success("تم رفع الملف 🎉")
+    content.append(Spacer(1, 10))
+
+    for k, v in features.items():
+        content.append(Paragraph(f"{k}: {round(v, 4)}", styles["Normal"]))
+
+    content.append(Spacer(1, 10))
+    content.append(Image(img_path, width=400, height=150))
+
+    doc.build(content)
+    return file_name
+
+
+# =========================
+# Session
+# =========================
+if "audio_path" not in st.session_state:
+    st.session_state.audio_path = None
+
+if "audio_bytes" not in st.session_state:
+    st.session_state.audio_bytes = None
+
+
+# =========================
+# Upload ONLY (Stable)
+# =========================
+uploaded = st.file_uploader(
+    "📁 ارفع ملف صوت (WAV فقط لضمان الاستقرار)",
+    type=["wav"]
+)
+
+
+if uploaded:
+
+    path = save_upload(uploaded)
+
+    st.session_state.audio_path = path
+    st.session_state.audio_bytes = uploaded.read()
+
+    st.success("✔ تم تحميل الملف بنجاح")
 
 
 # =========================
 # PROCESS
 # =========================
-if audio_path:
+if st.session_state.audio_path:
 
-    y, sr = load_audio(audio_path)
+    y, sr = read_wav(st.session_state.audio_path)
 
-    features = analyze_audio(y, sr)
+    features = analyze(y, sr)
     risk = risk_score(features)
 
     st.subheader("📊 Risk Score")
     st.progress(risk / 100)
     st.write(f"{risk}%")
 
-    st.subheader("🧠 Result")
-    label, prob = classify(features)
+    st.subheader("🧠 Prediction")
+
+    label, prob = predict(features)
 
     st.success(label)
 
@@ -176,13 +207,26 @@ if audio_path:
         "تعاطي": float(prob[2]),
     })
 
-    st.audio(audio_bytes)
+    st.audio(st.session_state.audio_bytes)
 
-    # Waveform
-    fig, ax = plt.subplots()
-    ax.plot(y)
-    ax.set_title("Waveform")
-    st.pyplot(fig)
+    st.pyplot(plot_wave(y))
 
     st.write("### Features")
     st.json(features)
+
+    # =========================
+    # PDF
+    # =========================
+    if st.button("📄 Generate Report"):
+
+        img_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+
+        plt.figure()
+        plt.plot(y)
+        plt.savefig(img_path)
+        plt.close()
+
+        pdf = create_pdf(features, risk, label, img_path)
+
+        with open(pdf, "rb") as f:
+            st.download_button("Download PDF", f, file_name=pdf)
