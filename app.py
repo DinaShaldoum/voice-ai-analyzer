@@ -14,6 +14,9 @@ import subprocess
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
 
+# 🎤 تسجيل صوت (بديل WebRTC)
+from streamlit_mic_recorder import mic_recorder
+
 
 # =========================
 # إعداد الصفحة
@@ -87,7 +90,7 @@ def classify_ml(features):
 
 
 # =========================
-# Waveform
+# الرسوم البيانية
 # =========================
 def plot_wave(y):
     fig, ax = plt.subplots()
@@ -96,9 +99,6 @@ def plot_wave(y):
     return fig
 
 
-# =========================
-# Frequency
-# =========================
 def plot_frequency(y, sr):
     fft = np.abs(scipy.fft.fft(y))
     freq = scipy.fft.fftfreq(len(fft), 1/sr)
@@ -110,9 +110,6 @@ def plot_frequency(y, sr):
     return fig
 
 
-# =========================
-# Spectrogram
-# =========================
 def plot_spectrogram(y, sr):
     spec = librosa.feature.melspectrogram(y=y, sr=sr)
     spec_db = librosa.power_to_db(spec, ref=np.max)
@@ -160,44 +157,72 @@ if "audio_bytes" not in st.session_state:
 
 
 # =========================
-# UI اختيار
+# اختيار الطريقة
 # =========================
-option = st.radio("اختر طريقة الإدخال:", ["رفع فيديو/صوت"])
+mode = st.radio("اختر طريقة الإدخال:", ["📁 رفع ملف", "🎙️ تسجيل صوت"])
 
 
 # =========================
-# رفع فيديو أو صوت + استخراج الصوت
+# 1) رفع فيديو/صوت
 # =========================
-uploaded = st.file_uploader(
-    "📁 ارفع فيديو من iPad / iPhone أو ملف صوت",
-    type=["mp4", "mov", "m4a", "wav", "mp3"]
-)
+if mode == "📁 رفع ملف":
 
-if uploaded:
-    tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp_video.write(uploaded.read())
-    tmp_video.close()
+    uploaded = st.file_uploader(
+        "ارفع فيديو (iPad / iPhone) أو ملف صوت",
+        type=["mp4", "mov", "m4a", "wav", "mp3"]
+    )
 
-    audio_path = tempfile.mktemp(suffix=".wav")
+    if uploaded:
+        tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        tmp_video.write(uploaded.read())
+        tmp_video.close()
 
-    # استخراج الصوت باستخدام ffmpeg
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i", tmp_video.name,
-        "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "44100",
-        "-ac", "1",
-        audio_path
-    ]
+        audio_path = tempfile.mktemp(suffix=".wav")
 
-    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i", tmp_video.name,
+            "-vn",
+            "-acodec", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "1",
+            audio_path
+        ]
 
-    st.session_state.audio_path = audio_path
-    st.session_state.audio_bytes = open(audio_path, "rb").read()
+        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    st.success("تم استخراج الصوت من الفيديو 🎉")
+        st.session_state.audio_path = audio_path
+        st.session_state.audio_bytes = open(audio_path, "rb").read()
+
+        st.success("تم استخراج الصوت من الفيديو 🎉")
+
+
+# =========================
+# 2) تسجيل صوت مباشر
+# =========================
+else:
+
+    st.subheader("🎙️ تسجيل صوت مباشر")
+
+    audio = mic_recorder(
+        start_prompt="🔴 ابدأ التسجيل",
+        stop_prompt="⏹️ إيقاف التسجيل"
+    )
+
+    if audio:
+
+        st.audio(audio["bytes"])
+
+        tmp_path = tempfile.mktemp(suffix=".wav")
+
+        with open(tmp_path, "wb") as f:
+            f.write(audio["bytes"])
+
+        st.session_state.audio_path = tmp_path
+        st.session_state.audio_bytes = audio["bytes"]
+
+        st.success("تم تسجيل الصوت بنجاح 🎉")
 
 
 # =========================
@@ -235,7 +260,7 @@ if st.session_state.audio_path:
     st.json(features)
 
     # =========================
-    # PDF
+    # PDF Report
     # =========================
     if st.button("📄 إنشاء تقرير PDF"):
 
