@@ -10,3 +10,4 @@ reportlab
 scikit-learn
  av
 streamlit-webrtc
+ffmpeg-python
