@@ -9,3 +9,4 @@ reportlab
 scikit-learn
 streamlit-mic-recorder
 streamlit-webrtc
+av
