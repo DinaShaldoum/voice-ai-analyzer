@@ -1,21 +1,26 @@
 import streamlit as st
 import numpy as np
 import librosa
-import tempfile
-import joblib
-import matplotlib.pyplot as plt
+import librosa.display
 import soundfile as sf
-from scipy.signal import find_peaks
+import matplotlib.pyplot as plt
+import tempfile
 import datetime
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+import scipy.fft
+from scipy.signal import find_peaks
+import joblib
+import os
+import base64
+
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
 
 
 # =========================
-# UI
+# PAGE
 # =========================
-st.set_page_config(page_title="Voice AI Stable", layout="centered")
-st.title("🎤 Voice AI Analyzer (Stable Production)")
+st.set_page_config(page_title="Voice AI iPhone", layout="centered")
+st.title("🎤 Voice AI Analyzer (iPhone Stable)")
 
 
 # =========================
@@ -29,29 +34,31 @@ model = load_model()
 
 
 # =========================
-# LOAD AUDIO SAFE (ANY FORMAT)
+# SAFE AUDIO LOAD
 # =========================
 def load_audio(file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(file.read())
-        tmp_path = tmp.name
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    tmp.write(file.read())
+    tmp.close()
 
-    y, sr = librosa.load(tmp_path, sr=16000, mono=True)
-    return y, sr, tmp_path
+    y, sr = librosa.load(tmp.name, sr=16000, mono=True)
+    return y, sr, tmp.name
 
 
 # =========================
 # FEATURES
 # =========================
-def analyze(y, sr):
-    energy = np.mean(np.abs(y))
-    zcr = np.mean(np.diff(np.sign(y)) != 0)
-    shimmer = np.std(y)
+def analyze_audio(y, sr):
+    pitches, _ = librosa.piptrack(y=y, sr=sr)
+    pitch_values = pitches[pitches > 0]
+
+    pitch_std = np.std(pitch_values) if len(pitch_values) else 0
+    energy = np.mean(librosa.feature.rms(y=y))
+    zcr = np.mean(librosa.feature.zero_crossing_rate(y))
+    shimmer = np.std(librosa.feature.rms(y=y))
 
     peaks, _ = find_peaks(y, height=0.02)
     speech_rate = len(peaks) / (len(y) / sr)
-
-    pitch_std = np.std(y)
 
     return {
         "pitch_std": float(pitch_std),
@@ -63,9 +70,9 @@ def analyze(y, sr):
 
 
 # =========================
-# FIXED PREDICTION
+# ML
 # =========================
-def predict(features):
+def classify(features):
     X = np.array([[
         features["pitch_std"],
         features["energy"],
@@ -100,7 +107,7 @@ def create_pdf(features, label):
     styles = getSampleStyleSheet()
     content = []
 
-    content.append(Paragraph("Voice Report", styles["Title"]))
+    content.append(Paragraph("Voice AI Report", styles["Title"]))
     content.append(Spacer(1, 10))
     content.append(Paragraph(f"Result: {label}", styles["Heading2"]))
 
@@ -112,19 +119,94 @@ def create_pdf(features, label):
 
 
 # =========================
-# UPLOAD (iPhone SAFE)
+# 🔴 iPhone Recorder (HTML)
 # =========================
-uploaded = st.file_uploader(
-    "📁 Upload audio/video (iPhone supported)",
-    type=["wav", "mp3", "m4a", "mp4", "mov"]
-)
+def audio_recorder():
+    st.markdown("""
+    <h3>🎙️ تسجيل مباشر من iPhone</h3>
 
-if uploaded:
+    <button onclick="startRecording()">Start Recording</button>
+    <button onclick="stopRecording()">Stop</button>
 
-    y, sr, path = load_audio(uploaded)
+    <script>
+    let recorder;
+    let chunks = [];
 
-    features = analyze(y, sr)
-    label, prob = predict(features)
+    async function startRecording(){
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recorder = new MediaRecorder(stream);
+        recorder.start();
+
+        recorder.ondataavailable = e => chunks.push(e.data);
+
+        recorder.onstop = () => {
+            const blob = new Blob(chunks, { type: 'audio/wav' });
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+
+            reader.onloadend = () => {
+                window.parent.postMessage({
+                    type: "streamlit:audio",
+                    data: reader.result
+                }, "*");
+            }
+        }
+    }
+
+    function stopRecording(){
+        recorder.stop();
+    }
+    </script>
+    """, unsafe_allow_html=True)
+
+
+# =========================
+# STATE
+# =========================
+if "audio_path" not in st.session_state:
+    st.session_state.audio_path = None
+
+if "audio_bytes" not in st.session_state:
+    st.session_state.audio_bytes = None
+
+
+# =========================
+# INPUT
+# =========================
+mode = st.radio("اختر:", ["📁 رفع ملف", "🎙️ تسجيل iPhone"])
+
+
+# =========================
+# UPLOAD
+# =========================
+if mode == "📁 رفع ملف":
+    uploaded = st.file_uploader("Upload audio/video", type=["wav", "mp3", "m4a", "mp4", "mov"])
+
+    if uploaded:
+        y, sr, path = load_audio(uploaded)
+
+        st.session_state.audio_path = path
+        st.session_state.audio_bytes = uploaded.read()
+
+        st.success("Uploaded ✔")
+
+
+# =========================
+# RECORD UI
+# =========================
+else:
+    audio_recorder()
+
+
+# =========================
+# PROCESS
+# =========================
+if st.session_state.audio_path:
+
+    y, sr = librosa.load(st.session_state.audio_path, sr=16000)
+
+    features = analyze_audio(y, sr)
+    label, prob = classify(features)
 
     st.subheader("📊 Result")
     st.success(label)
@@ -135,7 +217,7 @@ if uploaded:
         "تعاطي": float(prob[2]),
     })
 
-    st.audio(uploaded)
+    st.audio(st.session_state.audio_bytes)
 
     st.pyplot(plot_wave(y))
 
@@ -145,4 +227,4 @@ if uploaded:
     if st.button("📄 PDF Report"):
         pdf = create_pdf(features, label)
         with open(pdf, "rb") as f:
-            st.download_button("Download PDF", f, file_name=pdf)
+            st.download_button("Download", f, file_name=pdf)
