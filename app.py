@@ -4,10 +4,12 @@ import tempfile
 import datetime
 import joblib
 import matplotlib.pyplot as plt
-
-from scipy.signal import find_peaks
 import wave
 import io
+
+from scipy.signal import find_peaks
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+from reportlab.lib.styles import getSampleStyleSheet
 
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
 import av
@@ -16,8 +18,8 @@ import av
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="Voice AI iPhone Ready", layout="centered")
-st.title("🎤 Voice AI Analyzer (iPhone Stable)")
+st.set_page_config(page_title="Voice AI Realtime", layout="centered")
+st.title("🎤 Voice AI Realtime Analyzer (Stable)")
 
 
 # =========================
@@ -31,19 +33,19 @@ model = load_model()
 
 
 # =========================
-# SAFE WAV READER (NO LIBROSA)
+# SAFE WAV READER
 # =========================
-def read_wav(file_path):
-    with wave.open(file_path, "rb") as wf:
+def read_wav(path):
+    with wave.open(path, "rb") as wf:
         sr = wf.getframerate()
-        frames = wf.readframes(wf.getnframes())
+        audio = wf.readframes(wf.getnframes())
 
-    y = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    y = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
     return y, sr
 
 
 # =========================
-# ANALYSIS
+# ANALYSIS ENGINE (stable)
 # =========================
 def analyze(y, sr):
     energy = np.mean(np.abs(y))
@@ -62,7 +64,7 @@ def analyze(y, sr):
 
 
 # =========================
-# ML
+# ML PREDICTION
 # =========================
 def predict(features):
     X = np.array([[features["energy"], features["zcr"],
@@ -76,20 +78,48 @@ def predict(features):
 
 
 # =========================
-# AUDIO PROCESSOR (iPhone Safe)
+# PDF REPORT
+# =========================
+def create_pdf(features, label, img_path):
+    file_name = f"report_{datetime.datetime.now().strftime('%H%M%S')}.pdf"
+    doc = SimpleDocTemplate(file_name)
+    styles = getSampleStyleSheet()
+    content = []
+
+    content.append(Paragraph("Voice AI Report", styles["Title"]))
+    content.append(Spacer(1, 10))
+    content.append(Paragraph(f"Result: {label}", styles["Heading2"]))
+    content.append(Spacer(1, 10))
+
+    for k, v in features.items():
+        content.append(Paragraph(f"{k}: {round(v, 4)}", styles["Normal"]))
+
+    content.append(Spacer(1, 10))
+    content.append(Image(img_path, width=400, height=150))
+
+    doc.build(content)
+    return file_name
+
+
+# =========================
+# REALTIME AUDIO PROCESSOR (FIXED)
 # =========================
 class AudioProcessor(AudioProcessorBase):
     def __init__(self):
-        self.frames = []
+        self.buffer = []
 
     def recv(self, frame: av.AudioFrame):
         audio = frame.to_ndarray()
-        self.frames.append(audio)
+
+        # safe append (no shape crash)
+        if audio is not None:
+            self.buffer.append(audio)
+
         return frame
 
 
 # =========================
-# SESSION
+# SESSION STATE
 # =========================
 if "audio_path" not in st.session_state:
     st.session_state.audio_path = None
@@ -99,15 +129,15 @@ if "audio_bytes" not in st.session_state:
 
 
 # =========================
-# INPUT MODE
+# MODE
 # =========================
-mode = st.radio("اختر:", ["📁 رفع ملف صوت", "🎙️ تسجيل من iPhone"])
+mode = st.radio("اختر:", ["📁 رفع ملف", "🎙️ تسجيل realtime"])
 
 
 # =========================
 # UPLOAD
 # =========================
-if mode == "📁 رفع ملف صوت":
+if mode == "📁 رفع ملف":
     uploaded = st.file_uploader("ارفع WAV فقط", type=["wav"])
 
     if uploaded:
@@ -118,24 +148,35 @@ if mode == "📁 رفع ملف صوت":
         st.session_state.audio_path = tmp.name
         st.session_state.audio_bytes = open(tmp.name, "rb").read()
 
-        st.success("تم رفع الملف ✔")
+        st.success("✔ تم الرفع")
 
 
 # =========================
-# iPhone RECORD
+# REALTIME RECORD (FIXED)
 # =========================
 else:
-    st.subheader("🎙️ تسجيل صوت من iPhone")
+    st.subheader("🎙️ تسجيل realtime من iPhone")
 
     ctx = webrtc_streamer(
-        key="iphone-audio",
+        key="voice",
         audio_processor_factory=AudioProcessor,
         media_stream_constraints={"audio": True, "video": False},
     )
 
     if ctx.audio_processor:
+
         if st.button("💾 حفظ التسجيل"):
-            audio = np.concatenate(ctx.audio_processor.frames, axis=1)
+
+            frames = ctx.audio_processor.buffer
+
+            # 🔥 FIX: منع crash
+            clean = [f for f in frames if f is not None]
+
+            if len(clean) == 0:
+                st.warning("لا يوجد صوت مسجل")
+                st.stop()
+
+            audio = np.hstack(clean)
 
             audio = audio.T.astype(np.float32)
 
@@ -147,11 +188,11 @@ else:
             st.session_state.audio_path = tmp.name
             st.session_state.audio_bytes = open(tmp.name, "rb").read()
 
-            st.success("تم حفظ التسجيل ✔")
+            st.success("✔ تم الحفظ")
 
 
 # =========================
-# PROCESS
+# PROCESSING
 # =========================
 if st.session_state.audio_path:
 
@@ -161,7 +202,6 @@ if st.session_state.audio_path:
     label, prob = predict(features)
 
     st.subheader("📊 Result")
-
     st.success(label)
 
     st.write({
@@ -175,11 +215,27 @@ if st.session_state.audio_path:
     st.write("### Features")
     st.json(features)
 
-
-# =========================
-# WAVE
-# =========================
+    # =========================
+    # WAVE
+    # =========================
     fig, ax = plt.subplots()
     ax.plot(y)
     ax.set_title("Waveform")
     st.pyplot(fig)
+
+    # =========================
+    # PDF
+    # =========================
+    if st.button("📄 Generate PDF"):
+
+        img_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+
+        plt.figure()
+        plt.plot(y)
+        plt.savefig(img_path)
+        plt.close()
+
+        pdf = create_pdf(features, label, img_path)
+
+        with open(pdf, "rb") as f:
+            st.download_button("Download PDF", f, file_name=pdf)
