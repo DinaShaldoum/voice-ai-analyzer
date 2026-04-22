@@ -5,10 +5,6 @@ soundfile
 matplotlib
 scipy
 joblib
-sounddevice
 reportlab
 scikit-learn
- av
-streamlit-webrtc
-ffmpeg-python
 streamlit-mic-recorder
